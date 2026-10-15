@@ -737,3 +737,146 @@ class TrayTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─── dependency / environment helpers ────────────────────────────────────────
+import bthid_doctor as Dr
+
+class DaemonEnvTest(unittest.TestCase):
+    def _rfkill(self, base, name, typ, soft, hard="0"):
+        d = os.path.join(base, name); os.makedirs(d)
+        for k, v in (("type", typ), ("soft", soft), ("hard", hard)):
+            open(os.path.join(d, k), "w").write(v + "\n")
+        return d
+
+    def test_rfkill_unblock_only_bluetooth(self):
+        with tempfile.TemporaryDirectory() as base:
+            bt = self._rfkill(base, "rfkill0", "bluetooth", "1")
+            wl = self._rfkill(base, "rfkill1", "wlan", "1")
+            self.assertEqual(B.rfkill_unblock_bluetooth(base), 1)
+            self.assertEqual(open(os.path.join(bt, "soft")).read().strip(), "0")
+            self.assertEqual(open(os.path.join(wl, "soft")).read().strip(), "1")
+            self.assertEqual(B.rfkill_unblock_bluetooth(base), 0)
+
+    def test_find_bluetoothd_paths(self):
+        with mock.patch.object(B.os, "access", lambda p, m: p == "/usr/lib/bluetooth/bluetoothd"):
+            self.assertEqual(B.find_bluetoothd(), "/usr/lib/bluetooth/bluetoothd")      # Ubuntu 22.04
+        with mock.patch.object(B.os, "access", lambda p, m: False):
+            self.assertEqual(B.find_bluetoothd(), B.BLUETOOTHD_CANDIDATES[0])
+
+    def test_status_reports_powered(self):
+        d = B.Daemon(dict(B.DEFAULT_CONFIG, devices=[]), run=lambda *a, **k: None)
+        d.bluez = mock.Mock(devices_info=lambda m: {}, adapter_powered=lambda: False)
+        self.assertIs(d.status()["powered"], False)
+        d.bluez.adapter_powered = mock.Mock(side_effect=RuntimeError("no adapter"))
+        self.assertIs(d.status()["powered"], False)
+
+
+class DoctorTest(unittest.TestCase):
+    def levels(self, r): return {n: l for l, n, _ in r.rows}
+
+    def test_os(self):
+        r = Dr.Report(); Dr.check_os(r, {"ID": "ubuntu", "VERSION_ID": "24.04"}); self.assertEqual(r.rows[0][0], "OK")
+        r = Dr.Report(); Dr.check_os(r, {"ID": "ubuntu", "VERSION_ID": "20.04"}); self.assertEqual(r.rows[0][0], "WARN")
+        r = Dr.Report(); Dr.check_os(r, {"ID": "arch"}); self.assertEqual(r.rows[0][0], "WARN")
+        self.assertIn("ID", Dr.os_release())
+
+    def test_python_ok_and_fail(self):
+        r = Dr.Report(); Dr.check_python(r)
+        self.assertEqual(self.levels(r)["파이썬 모듈"], "OK")       # real system python on this PC
+        fake = subprocess_result(1, "", "ModuleNotFoundError: No module named 'gi'")
+        with mock.patch.object(Dr, "run", return_value=fake):
+            r = Dr.Report(); Dr.check_python(r)
+        lvl, _, detail = next(x for x in r.rows if x[1] == "파이썬 모듈")
+        self.assertEqual(lvl, "FAIL"); self.assertIn("python3-gi", detail)
+        with mock.patch.object(Dr.os, "access", return_value=False):
+            r = Dr.Report(); Dr.check_python(r); self.assertEqual(r.rows[0][0], "FAIL")
+
+    def test_python_warns_about_conda(self):
+        with mock.patch.object(Dr.shutil, "which", return_value="/opt/conda/bin/python3"):
+            r = Dr.Report(); Dr.check_python(r)
+        self.assertEqual(self.levels(r)["PATH의 python3"], "WARN")
+
+    def test_packages(self):
+        with mock.patch.object(Dr, "missing_packages", return_value=["python3-gi"]), \
+             mock.patch.object(Dr.shutil, "which", return_value="/usr/bin/x"):
+            r = Dr.Report(); Dr.check_packages(r)
+        self.assertEqual(r.rows[0][0], "FAIL"); self.assertIn("apt install python3-gi", r.rows[0][2])
+        r = Dr.Report(); Dr.check_packages(r); self.assertEqual(r.rows[0][0], "OK")
+        self.assertEqual(Dr.missing_packages(["definitely-not-a-package-zzz"]), ["definitely-not-a-package-zzz"])
+        with mock.patch.object(Dr.shutil, "which", return_value=None):
+            r = Dr.Report(); Dr.check_packages(r); self.assertEqual(r.rows[0][0], "WARN")
+
+    def test_adapter_and_rfkill(self):
+        with tempfile.TemporaryDirectory() as sysfs, tempfile.TemporaryDirectory() as rf:
+            r = Dr.Report(); Dr.check_adapter(r, sysfs, rf); self.assertEqual(r.rows[0][0], "FAIL")
+            os.makedirs(os.path.join(sysfs, "hci0")); os.makedirs(os.path.join(sysfs, "hci0:1"))
+            DaemonEnvTest._rfkill(None, rf, "rfkill0", "bluetooth", "1")
+            r = Dr.Report(); Dr.check_adapter(r, sysfs, rf)
+            self.assertEqual([x[0] for x in r.rows], ["OK", "WARN"]); self.assertEqual(r.rows[0][2], "hci0")
+            DaemonEnvTest._rfkill(None, rf, "rfkill1", "bluetooth", "0", hard="1")
+            r = Dr.Report(); Dr.check_adapter(r, sysfs, rf); self.assertIn("FAIL", [x[0] for x in r.rows])
+
+    def test_bluez_checks(self):
+        def fake_run(cmd, **kw):
+            if cmd[-1] == "--version" and "bluetoothd" in cmd[0]: return subprocess_result(0, "5.40\n")
+            if cmd[:2] == ["systemctl", "is-active"]: return subprocess_result(3, "inactive\n")
+            if cmd[:2] == ["systemctl", "show"]: return subprocess_result(0, "argv[]=/usr/libexec/bluetooth/bluetoothd\n")
+            if cmd == ["systemctl", "--version"]: return subprocess_result(0, "systemd 245 (245.4)\n")
+            return subprocess_result(0, "")
+        with mock.patch.object(Dr, "run", fake_run), mock.patch.object(Dr, "find_bluetoothd", return_value="/x/bluetoothd"):
+            r = Dr.Report(); Dr.check_bluez(r, installed=True)
+        lv = self.levels(r)
+        self.assertEqual(lv["bluetoothd"], "WARN"); self.assertEqual(lv["bluetooth.service"], "FAIL")
+        self.assertEqual(lv["bluetoothd 옵션"], "FAIL"); self.assertEqual(lv["systemd"], "WARN")
+        with mock.patch.object(Dr, "find_bluetoothd", return_value=None):
+            r = Dr.Report(); Dr.check_bluez(r, installed=False); self.assertEqual(r.rows[0][0], "FAIL")
+        r = Dr.Report(); Dr.check_bluez(r, installed=True)          # real system
+        self.assertEqual(self.levels(r)["bluetoothd"], "OK")
+
+    def test_audio(self):
+        for which, lvl in ((lambda n: n == "wireplumber", "OK"), (lambda n: n == "pulseaudio", "WARN"), (lambda n: None, "OK")):
+            with mock.patch.object(Dr.shutil, "which", which):
+                r = Dr.Report(); Dr.check_audio(r); self.assertEqual(r.rows[0][0], lvl)
+
+    def test_installed_checks(self):
+        with tempfile.TemporaryDirectory() as lib:
+            r = Dr.Report(); Dr.check_installed(r, lib=lib); self.assertEqual(r.rows[0][0], "FAIL")
+            for f in ("bthidd.py", "bthid_tray.py", "hid.xml"): open(os.path.join(lib, f), "w").close()
+            r = Dr.Report(); Dr.check_installed(r, lib=lib, sock=os.path.join(lib, "none.sock"))
+            lv = self.levels(r); self.assertEqual(lv["설치 파일"], "OK"); self.assertEqual(lv["제어 소켓"], "FAIL")
+            srv = socket.socket(socket.AF_UNIX); sp = os.path.join(lib, "s.sock"); srv.bind(sp); srv.listen(1)
+            def serve():
+                c, _ = srv.accept(); c.makefile().readline(); c.sendall(b'{"ok": true}\n'); c.close()
+            th = threading.Thread(target=serve); th.start()
+            r = Dr.Report(); Dr.check_installed(r, lib=lib, sock=sp); th.join(2); srv.close()
+            self.assertEqual(self.levels(r)["제어 소켓"], "OK")
+            with mock.patch.object(Dr.socket.socket, "connect", side_effect=PermissionError):
+                r = Dr.Report(); Dr.check_installed(r, lib=lib, sock=sp)
+            self.assertIn("권한", dict((n, d) for _, n, d in r.rows)["제어 소켓"])
+
+    def test_desktop_checks(self):
+        env = {"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "ubuntu:GNOME", "XDG_SESSION_TYPE": "x11"}
+        def fake_run(cmd, **kw):
+            if cmd[0] == "gnome-extensions": return subprocess_result(0, "other@x\n")
+            return subprocess_result(1, "")
+        with mock.patch.dict(os.environ, env), mock.patch.object(Dr, "run", fake_run), \
+             mock.patch.object(Dr.shutil, "which", return_value="/usr/bin/gnome-extensions"):
+            r = Dr.Report(); Dr.check_desktop(r)
+        lv = self.levels(r)
+        self.assertEqual(lv["GNOME 트레이 확장"], "FAIL"); self.assertEqual(lv["트레이 실행"], "WARN")
+        with mock.patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": ""}):
+            r = Dr.Report(); Dr.check_desktop(r); self.assertEqual(r.rows[0][0], "WARN")
+        with mock.patch.object(Dr.os, "geteuid", return_value=0):
+            r = Dr.Report(); Dr.check_desktop(r); self.assertEqual(r.rows, [])
+
+    def test_main_and_report(self):
+        with mock.patch("builtins.print"):
+            self.assertIn(Dr.main(["--pre"]), (0, 1))
+            r = Dr.Report(); r.fail("x"); r.print(); self.assertTrue(r.failed)
+        res = Dr.run(["/nonexistent-binary-zzz"]); self.assertEqual(res.returncode, 127)
+
+
+def subprocess_result(code, out, err=""):
+    import subprocess
+    return subprocess.CompletedProcess([], code, out, err)

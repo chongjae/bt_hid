@@ -14,7 +14,9 @@ APP_DIR      = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH  = os.environ.get("BTHID_CONFIG", "/etc/bthid/config.json")
 SOCK_PATH    = os.environ.get("BTHID_SOCK", "/run/bthid/ctl.sock")
 PAIR_DROPIN  = "/run/systemd/system/bluetooth.service.d/zz-bthid-pair.conf"
-BLUETOOTHD   = "/usr/libexec/bluetooth/bluetoothd"
+BLUETOOTHD_CANDIDATES = ["/usr/libexec/bluetooth/bluetoothd", "/usr/lib/bluetooth/bluetoothd",
+                         "/usr/sbin/bluetoothd"]   # Ubuntu/Debian, Arch/Fedora, others
+RFKILL_DIR   = "/sys/class/rfkill"
 HID_UUID     = "00001124-0000-1000-8000-00805f9b34fb"
 PSM_CTRL, PSM_INTR = 0x11, 0x13
 PAIR_WINDOW  = 120          # seconds the PC stays discoverable
@@ -22,6 +24,23 @@ PAIR_SETTLE  = 8            # seconds after bonding before restoring normal blue
 SEND_TIMEOUT = 1.0          # intr send timeout; on expiry the relay turns OFF (input never stays grabbed)
 
 SOL_BLUETOOTH, BT_SECURITY = 274, 4
+
+def find_bluetoothd():
+    return next((p for p in BLUETOOTHD_CANDIDATES if os.access(p, os.X_OK)), BLUETOOTHD_CANDIDATES[0])
+
+def rfkill_unblock_bluetooth(base=None):
+    """Soft-unblock Bluetooth via sysfs (no rfkill binary needed). Returns how many were unblocked."""
+    import glob
+    n = 0
+    for d in glob.glob(os.path.join(base or RFKILL_DIR, "rfkill*")):
+        try:
+            if open(os.path.join(d, "type")).read().strip() == "bluetooth" and \
+               open(os.path.join(d, "soft")).read().strip() == "1":
+                with open(os.path.join(d, "soft"), "w") as f: f.write("0")
+                n += 1
+        except OSError:
+            pass
+    return n
 
 def log(*a):
     print("[bthidd]", *a, flush=True)
@@ -304,6 +323,8 @@ class Daemon:
                      capture_output=True, timeout=15)
 
     def enter_pair_mode(self):
+        if rfkill_unblock_bluetooth():
+            log("pairing: Bluetooth was soft-blocked (꺼짐) — unblocked")
         self._user_systemctl("stop", "wireplumber")
         user = self.cfg.get("user")
         if user:   # dead-man: audio comes back even if this daemon dies mid-pairing
@@ -313,7 +334,7 @@ class Daemon:
         os.makedirs(os.path.dirname(PAIR_DROPIN), exist_ok=True)
         with open(PAIR_DROPIN, "w") as f:
             f.write("[Service]\nExecStart=\n"
-                    f"ExecStart={BLUETOOTHD} -C --noplugin=input,a2dp,avrcp\n")
+                    f"ExecStart={find_bluetoothd()} -C --noplugin=input,a2dp,avrcp\n")
         self.bluez_ready = False
         self.run(["systemctl", "daemon-reload"], timeout=30)
         self.run(["systemctl", "restart", "bluetooth"], timeout=30)
@@ -467,10 +488,12 @@ class Daemon:
         return {"ok": False, "error": f"unknown cmd {cmd!r}"}
 
     def status(self):
-        info = {}
+        info, powered = {}, None
         if self.bluez:
             try: info = self.bluez.devices_info(self.cfg["devices"])
             except Exception as e: log("devices_info failed:", e)
+            try: powered = self.bluez.adapter_powered()
+            except Exception: powered = False
         target = self.cfg["target"]
         return {
             "ok": True, "state": self.state,
@@ -480,6 +503,7 @@ class Daemon:
             "target": target,
             "devices": [dict(info.get(m.upper(), {}), mac=m) for m in self.cfg["devices"]],
             "hotkey": self.cfg["hotkey"],
+            "powered": powered,
         }
 
     # ── background loops ──
@@ -748,6 +772,10 @@ class BluezBridge:
         except Exception as e:
             log("power on:", e)
         log("HID profile + agent registered")
+
+    def adapter_powered(self):
+        obj = self.bus.get_object("org.bluez", self._adapter())
+        return bool(obj.Get("org.bluez.Adapter1", "Powered", dbus_interface="org.freedesktop.DBus.Properties"))
 
     def claim_default_agent(self):
         am = self.dbus.Interface(self.bus.get_object("org.bluez", "/org/bluez"), "org.bluez.AgentManager1")

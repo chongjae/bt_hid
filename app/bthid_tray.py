@@ -41,6 +41,8 @@ def summary(st):
     if state != "idle":
         extra = f" ({st.get('pair_remaining', 0)}초 남음)" if state == "pairing" else ""
         return STATE_TEXT.get(state, state) + extra
+    if st.get("powered") is False:
+        return "PC 블루투스 꺼짐 (페어링을 누르면 켜져요)"
     if not st.get("target"):
         return "페어링된 폰 없음"
     if st.get("relay"):

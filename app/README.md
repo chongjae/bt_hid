@@ -45,5 +45,12 @@ sudo ./uninstall.sh      # 제거
 
 ```bash
 python3 -m unittest discover -s tests
-python3 -m coverage run --include='bthidd.py,bthid_tray.py' -m unittest discover -s tests && python3 -m coverage report
+python3 -m coverage run --include='bthidd.py,bthid_tray.py,bthid_doctor.py' -m unittest discover -s tests && python3 -m coverage report
+```
+
+## 진단
+
+```bash
+bthid-doctor          # 설치 후 전체 진단
+/usr/bin/python3 bthid_doctor.py --pre   # 설치 전
 ```

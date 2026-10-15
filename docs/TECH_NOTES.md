@@ -63,6 +63,14 @@ idle ──pair_start──▶ preparing ──bluez up + 어댑터 준비──
 | `capture` `{on}` | 트레이가 단축키를 기록하는 중. 기존 단축키를 막아요 (60초 뒤 자동 해제) |
 | `relay_off` | 비상용: 전달 끄기 + grab 해제 |
 
+## 다른 PC 호환성
+
+- **`bluetoothd` 경로:** 22.04는 `/usr/lib/bluetooth/bluetoothd`, 24.04는 `/usr/libexec/bluetooth/bluetoothd`예요(확인: 깨끗한 컨테이너). `install.sh`와 데몬이 둘 다 자동으로 찾아요.
+- **파이썬:** `gi`, `dbus`, `evdev`는 apt 패키지로 깔려서 시스템 파이썬에만 있어요. 그래서 실행 파일 첫 줄, systemd 유닛, 자동 시작 항목 모두 `/usr/bin/python3`로 고정했어요. conda나 venv에서는 동작하지 않아요.
+- **systemd 248 미만:** `--machine=user@`를 쓸 수 없어요. 그러면 페어링 중 WirePlumber 일시정지가 동작하지 않고, 페어링은 진행돼요.
+- **PulseAudio 환경:** 페어링 중 통화 항목이 폰에 보일 수 있어요. 연결은 에이전트가 거절해요.
+- **rfkill:** 데몬이 sysfs(`/sys/class/rfkill/*/soft`)로 직접 해제해서 `rfkill` 명령이 없어도 돼요.
+
 ## 디버깅
 
 - **데몬 로그:** `journalctl -u bthidd -f`

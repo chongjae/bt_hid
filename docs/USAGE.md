@@ -2,9 +2,22 @@
 
 ## 0. 요구 사항
 
-- Ubuntu 24.04 (GNOME, X11 기준으로 확인), 블루투스 어댑터
-- 시스템 패키지(`install.sh`가 없으면 자동으로 설치해요):
-  `python3-gi python3-dbus python3-evdev gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 gnome-shell-extension-appindicator bluez`
+- **OS:** Ubuntu 22.04 / 24.04
+  - 24.04는 실기기로 확인했어요.
+  - 22.04는 깨끗한 컨테이너에서 패키지 설치와 모듈 import까지만 확인했어요.
+  - 블루투스 어댑터가 있어야 해요.
+- **시스템 패키지:** `install.sh`가 없는 걸 확인해서 apt로 자동 설치해요.
+  - `python3 python3-gi python3-dbus python3-evdev gir1.2-glib-2.0 gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 bluez`
+  - GNOME이면 `gnome-shell-extension-appindicator`도 설치해요.
+- **PC마다 다른 경로는 자동으로 찾아요.**
+  - `bluetoothd` 위치: 24.04는 `/usr/libexec/bluetooth/`, 22.04는 `/usr/lib/bluetooth/`
+  - 블루투스가 꺼져 있으면(rfkill) 페어링을 시작할 때 자동으로 켜요.
+- **자가 진단:** `bthid-doctor`를 sudo 없이 실행하면 아래 항목을 한 번에 점검하고 해결 방법을 알려 줘요.
+  - OS, 파이썬 모듈, apt 패키지
+  - 어댑터, rfkill, bluetoothd 버전·옵션, systemd 버전, 오디오 스택
+  - 설치 파일, 서비스, 제어 소켓 권한
+  - GNOME 트레이 확장, 트레이 실행 여부
+  - 설치 전에 검사만 하려면 `/usr/bin/python3 app/bthid_doctor.py --pre`를 실행해요.
 - 프로그램은 항상 **시스템 파이썬 `/usr/bin/python3`**으로 실행돼요. conda나 venv 파이썬에는 `gi`(PyGObject)가 없어서 `ModuleNotFoundError: No module named 'gi'`가 나요. `pip install`로 해결하지 말고 위 apt 패키지를 쓰세요.
 
 ## 1. 설치
@@ -16,7 +29,7 @@ bthid-tray &        # 지금 바로 트레이 띄우기 (sudo 없이)
 
 `install.sh`가 하는 일은 이래요.
 
-0. 필요한 패키지를 확인하고, 없으면 apt로 설치해요. 시스템 파이썬으로 import도 확인해요.
+0. 필요한 패키지를 확인하고, 없으면 apt로 설치해요. 그다음 `bthid-doctor --pre`로 점검하고, FAIL이 있으면 설치를 멈춰요.
 1. 예전 실험용 프로세스를 정리해요. `bt-agent`, `legacy/bt_hid.py`, `start.sh`가 대상이에요.
 2. 프로그램을 `/usr/local/lib/bthid/`에 복사해요. root 소유로 둬서 일반 사용자가 고칠 수 없어요.
 3. 설정 파일 `/etc/bthid/config.json`을 만들어요. 이미 있으면 건드리지 않아요.
@@ -93,6 +106,7 @@ sudo ~/bt_hid/app/uninstall.sh
 
 | 증상 | 확인할 것 |
 |---|---|
+| 무엇이든 이상할 때 | **먼저 `bthid-doctor` 실행.** FAIL 항목에 해결 방법이 함께 나와요 |
 | `No module named 'gi'` | conda/venv 파이썬으로 실행한 경우예요. `/usr/bin/python3 /usr/local/lib/bthid/bthid_tray.py`로 실행하거나 `sudo ./install.sh`를 다시 실행해요 (패키지 자동 설치) |
 | 트레이에 "데몬 미실행" | `systemctl status bthidd`, 다시 켜려면 `sudo systemctl restart bthidd` |
 | 폰 연결이 안 됨 | 폰 블루투스가 켜져 있는지, 폰 설정에서 이 PC의 "텍스트 입력"이 켜져 있는지 |
@@ -115,8 +129,8 @@ adb logcat --pid=$(adb shell pidof com.android.bluetooth) | grep -i hh
 
 ```bash
 cd ~/bt_hid/app
-DISPLAY=:0 python3 -m unittest discover -s tests          # 테스트 67개
-DISPLAY=:0 python3 -m coverage run --include='bthidd.py,bthid_tray.py' -m unittest discover -s tests && python3 -m coverage report
+DISPLAY=:0 python3 -m unittest discover -s tests          # 테스트 80개
+DISPLAY=:0 python3 -m coverage run --include='bthidd.py,bthid_tray.py,bthid_doctor.py' -m unittest discover -s tests && python3 -m coverage report
 ```
 
 코드를 고친 뒤에는 `sudo ./install.sh`를 다시 실행해야 반영돼요. 설정 파일은 그대로 남아요.
