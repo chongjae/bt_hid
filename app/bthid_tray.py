@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """bthid-tray — system tray UI for bthidd (runs as the desktop user)."""
 import json, os, socket, threading
 

@@ -1,5 +1,12 @@
 # 사용 설명서
 
+## 0. 요구 사항
+
+- Ubuntu 24.04 (GNOME, X11 기준으로 확인), 블루투스 어댑터
+- 시스템 패키지(`install.sh`가 없으면 자동으로 설치해요):
+  `python3-gi python3-dbus python3-evdev gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 gnome-shell-extension-appindicator bluez`
+- 프로그램은 항상 **시스템 파이썬 `/usr/bin/python3`**으로 실행돼요. conda나 venv 파이썬에는 `gi`(PyGObject)가 없어서 `ModuleNotFoundError: No module named 'gi'`가 나요. `pip install`로 해결하지 말고 위 apt 패키지를 쓰세요.
+
 ## 1. 설치
 
 ```bash
@@ -9,6 +16,7 @@ bthid-tray &        # 지금 바로 트레이 띄우기 (sudo 없이)
 
 `install.sh`가 하는 일은 이래요.
 
+0. 필요한 패키지를 확인하고, 없으면 apt로 설치해요. 시스템 파이썬으로 import도 확인해요.
 1. 예전 실험용 프로세스를 정리해요. `bt-agent`, `legacy/bt_hid.py`, `start.sh`가 대상이에요.
 2. 프로그램을 `/usr/local/lib/bthid/`에 복사해요. root 소유로 둬서 일반 사용자가 고칠 수 없어요.
 3. 설정 파일 `/etc/bthid/config.json`을 만들어요. 이미 있으면 건드리지 않아요.
@@ -85,6 +93,7 @@ sudo ~/bt_hid/app/uninstall.sh
 
 | 증상 | 확인할 것 |
 |---|---|
+| `No module named 'gi'` | conda/venv 파이썬으로 실행한 경우예요. `/usr/bin/python3 /usr/local/lib/bthid/bthid_tray.py`로 실행하거나 `sudo ./install.sh`를 다시 실행해요 (패키지 자동 설치) |
 | 트레이에 "데몬 미실행" | `systemctl status bthidd`, 다시 켜려면 `sudo systemctl restart bthidd` |
 | 폰 연결이 안 됨 | 폰 블루투스가 켜져 있는지, 폰 설정에서 이 PC의 "텍스트 입력"이 켜져 있는지 |
 | 폰에서 "텍스트 입력"이 켜졌다 바로 꺼짐 | 폰과 PC 양쪽에서 페어링을 지우고 "신규 장비 페어링"을 다시 해요 |

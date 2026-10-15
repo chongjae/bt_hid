@@ -7,6 +7,23 @@ USER_HOME=$(getent passwd "$USER_NAME" | cut -d: -f6)
 SRC=$(cd "$(dirname "$0")" && pwd)
 LIB=/usr/local/lib/bthid
 
+echo "[0/6] 필요한 패키지 설치"
+DEPS="python3-gi python3-dbus python3-evdev gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1 gnome-shell-extension-appindicator bluez"
+MISSING=$(for p in $DEPS; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'ok installed' || echo "$p"; done)
+if [ -n "$MISSING" ]; then
+  echo "  설치: $MISSING"
+  apt-get update -qq && apt-get install -y $MISSING
+fi
+# 시스템 파이썬(/usr/bin/python3)으로 모듈이 실제로 import되는지 확인 (conda/venv 파이썬은 쓰지 않아요)
+/usr/bin/python3 - <<'PY' || { echo "필수 파이썬 모듈 확인 실패 — 위 오류를 확인해 주세요"; exit 1; }
+import gi, dbus, evdev
+gi.require_version("Gtk", "3.0"); gi.require_version("AyatanaAppIndicator3", "0.1")
+from gi.repository import Gtk, GLib, AyatanaAppIndicator3
+PY
+# 트레이 아이콘 표시용 GNOME 확장 켜기 (사용자 세션에서)
+sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$USER_NAME")/bus" \
+  gnome-extensions enable ubuntu-appindicators@ubuntu.com 2>/dev/null || true
+
 echo "[1/6] 이전 실험용 프로세스 정리"
 pkill -x bt-agent 2>/dev/null || true
 pkill -f 'bt_hid/(legacy/)?bt_hid\.py' 2>/dev/null || true

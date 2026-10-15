@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """bthidd — BT HID Relay daemon (root, systemd).
 
 PC keyboard/mouse → phone over Bluetooth Classic HID. The PC acts as an HID
