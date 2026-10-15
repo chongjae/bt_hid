@@ -68,7 +68,14 @@ idle ──pair_start──▶ preparing ──bluez up + 어댑터 준비──
 - **`bluetoothd` 경로:** 22.04는 `/usr/lib/bluetooth/bluetoothd`, 24.04는 `/usr/libexec/bluetooth/bluetoothd`예요(확인: 깨끗한 컨테이너). `install.sh`와 데몬이 둘 다 자동으로 찾아요.
 - **파이썬:** `gi`, `dbus`, `evdev`는 apt 패키지로 깔려서 시스템 파이썬에만 있어요. 그래서 실행 파일 첫 줄, systemd 유닛, 자동 시작 항목 모두 `/usr/bin/python3`로 고정했어요. conda나 venv에서는 동작하지 않아요.
 - **systemd 248 미만:** `--machine=user@`를 쓸 수 없어요. 그러면 페어링 중 WirePlumber 일시정지가 동작하지 않고, 페어링은 진행돼요.
-- **PulseAudio 환경:** 페어링 중 통화 항목이 폰에 보일 수 있어요. 연결은 에이전트가 거절해요.
+- **오디오 스택별 처리:** 페어링 중에는 *실행 중인* 쪽만 잠시 멈추고, 끝나면 멈춘 것만 다시 켜요. 무엇을 멈췄는지는 drop-in 첫 줄 `# bthid wp=.. pulse=..`에 기록해요.
+  - WirePlumber(24.04 기본)는 사용자 서비스를 정지해요.
+  - PulseAudio(22.04 기본)는 `pactl unload-module module-bluetooth-discover`로 내려요.
+  - 데몬이 중간에 죽어도 300초 뒤 오디오가 돌아오도록 각각 dead-man 타이머를 걸어요.
+  - 22.04 실기기에서 폰에 실제로 무엇이 보이는지는 아직 확인하지 못했어요.
+- **설치·제거 원상복구:** 처음 설치할 때 원래 파일을 `*.bthid.bak`으로 백업해요. 원래 파일이 없었으면 `*.bthid.none`을 남겨요. 우리가 만든 `hid.conf`에는 `# bthid-managed` 표시를 넣어서, 설치를 다시 실행해도 백업을 덮어쓰지 않아요. `uninstall.sh`는 이 기록을 보고 설치 전 상태로 되돌려요.
+- **`~/.config` 권한:** 설치할 때 기존 권한은 건드리지 않아요. 폴더가 없을 때만 700으로 만들어요.
+- **트레이 아이콘:** 아이콘 테마(Yaru, Humanity, Adwaita, Breeze)마다 이름이 달라요. 그래서 후보 목록에서 실제로 있는 아이콘을 골라요. 데스크톱은 GNOME과 KDE에서만 확인했어요. XFCE 등은 StatusNotifier를 지원하는 패널 플러그인이 필요해요.
 - **rfkill:** 데몬이 sysfs(`/sys/class/rfkill/*/soft`)로 직접 해제해서 `rfkill` 명령이 없어도 돼요.
 
 ## 디버깅

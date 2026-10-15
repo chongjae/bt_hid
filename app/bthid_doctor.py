@@ -112,10 +112,10 @@ def check_packages(r):
     else:
         r.ok("apt 패키지", f"{len(pkgs)}개 설치됨")
 
-def check_adapter(r, sysfs="/sys/class/bluetooth", rfkill="/sys/class/rfkill"):
+def check_adapter(r, sysfs="/sys/class/bluetooth", rfkill="/sys/class/rfkill", pre=False):
     hcis = [os.path.basename(p) for p in glob.glob(os.path.join(sysfs, "hci*")) if ":" not in os.path.basename(p)]
     if not hcis:
-        r.fail("블루투스 어댑터", "없음 — USB 동글/내장 블루투스 확인 (lsusb, dmesg | grep -i bluetooth)")
+        (r.warn if pre else r.fail)("블루투스 어댑터", "없음 — USB 동글/내장 블루투스 확인 (lsusb, dmesg | grep -i bluetooth)")
     else:
         r.ok("블루투스 어댑터", ", ".join(sorted(hcis)))
     for d in glob.glob(os.path.join(rfkill, "rfkill*")):
@@ -148,7 +148,10 @@ def check_bluez(r, installed):
         old = False
     (r.warn if old else r.ok)("bluetoothd", f"{btd} {ver}" + (" — 5.50 이상 권장" if old else ""))
     active = run(["systemctl", "is-active", "bluetooth"]).stdout.strip()
-    (r.ok if active == "active" else r.fail)("bluetooth.service", active or "?")
+    if active == "active":
+        r.ok("bluetooth.service", active)
+    else:
+        r.fail("bluetooth.service", f"{active or '?'} → sudo systemctl enable --now bluetooth")
     if installed:
         exec_start = run(["systemctl", "show", "-p", "ExecStart", "--value", "bluetooth"]).stdout
         if "--noplugin=input" in exec_start:
@@ -165,7 +168,7 @@ def check_audio(r):
     if shutil.which("wireplumber"):
         r.ok("오디오 스택", "PipeWire/WirePlumber")
     elif shutil.which("pulseaudio"):
-        r.warn("오디오 스택", "PulseAudio — 페어링 시 통화 항목이 폰에 보일 수 있음 (연결은 PC가 거절)")
+        r.ok("오디오 스택", "PulseAudio — 페어링 중 module-bluetooth-discover를 잠시 내려요")
     else:
         r.ok("오디오 스택", "블루투스 오디오 서비스 없음")
 
@@ -196,7 +199,12 @@ def check_desktop(r):
     sess = os.environ.get("XDG_SESSION_TYPE", "?")
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         r.warn("데스크톱 세션", "그래픽 세션 밖에서 실행 중 — 트레이 검사는 데스크톱 터미널에서 하세요"); return
-    r.ok("데스크톱 세션", f"{os.environ.get('XDG_CURRENT_DESKTOP', '?')} / {sess}")
+    desk = os.environ.get("XDG_CURRENT_DESKTOP", "?")
+    if is_gnome() or "KDE" in desk.upper():
+        r.ok("데스크톱 세션", f"{desk} / {sess}")
+    else:
+        r.warn("데스크톱 세션", f"{desk} / {sess} — GNOME/KDE에서만 확인됨. 트레이가 안 보이면 "
+                              "StatusNotifier(AppIndicator) 지원 패널 플러그인을 설치하세요")
     if is_gnome() and shutil.which("gnome-extensions"):
         enabled = run(["gnome-extensions", "list", "--enabled"]).stdout
         if "appindicator" in enabled.lower():
@@ -210,7 +218,7 @@ def check_desktop(r):
 def main(argv=sys.argv[1:]):
     pre = "--pre" in argv
     r = Report()
-    check_os(r); check_python(r); check_packages(r); check_adapter(r); check_bluez(r, installed=not pre)
+    check_os(r); check_python(r); check_packages(r); check_adapter(r, pre=pre); check_bluez(r, installed=not pre)
     check_audio(r)
     if not pre:
         check_installed(r); check_desktop(r)

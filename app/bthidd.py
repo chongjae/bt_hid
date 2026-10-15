@@ -8,7 +8,7 @@ daemon through a Unix socket (newline-delimited JSON, one request per connection
 Threads: GLib main loop (all D-Bus + control socket), input loop (evdev),
 L2CAP accept loop, phone reconnect loop.
 """
-import json, os, selectors, socket, struct, subprocess, sys, threading, time
+import json, os, selectors, shutil, socket, struct, subprocess, sys, threading, time
 
 APP_DIR      = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH  = os.environ.get("BTHID_CONFIG", "/etc/bthid/config.json")
@@ -319,35 +319,81 @@ class Daemon:
     def _user_systemctl(self, *args):
         user = self.cfg.get("user")
         if user:
-            self.run(["systemctl", "--user", f"--machine={user}@", *args],
-                     capture_output=True, timeout=15)
+            return self.run(["systemctl", "--user", f"--machine={user}@", *args],
+                            capture_output=True, text=True, timeout=15)
+
+    def _user_cmd(self, *args):
+        """Run a command inside the desktop user's session (pactl needs their runtime dir)."""
+        user = self.cfg.get("user")
+        if not user:
+            return None
+        import pwd
+        uid = pwd.getpwnam(user).pw_uid
+        return self.run(["runuser", "-u", user, "--", "env", "LC_ALL=C", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                         f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus", *args],
+                        capture_output=True, text=True, timeout=15)
+
+    def _deadman(self, unit, *cmd):
+        """Restore audio after 300s even if this daemon dies mid-pairing."""
+        user = self.cfg.get("user")
+        if user:
+            self.run(["systemd-run", "--user", f"--machine={user}@", "--on-active=300",
+                      f"--unit={unit}", *cmd], capture_output=True, timeout=15)
+
+    @staticmethod
+    def _out(res):
+        return getattr(res, "stdout", "") or ""
 
     def enter_pair_mode(self):
+        """Hide call/audio from the phone while it bonds: pause the user's Bluetooth audio
+        (WirePlumber or PulseAudio, only if running) and run bluetoothd without a2dp/avrcp."""
         if rfkill_unblock_bluetooth():
             log("pairing: Bluetooth was soft-blocked (꺼짐) — unblocked")
-        self._user_systemctl("stop", "wireplumber")
-        user = self.cfg.get("user")
-        if user:   # dead-man: audio comes back even if this daemon dies mid-pairing
-            self.run(["systemd-run", "--user", f"--machine={user}@", "--on-active=300",
-                      "--unit=bthid-wp-deadman", "systemctl", "--user", "start", "wireplumber"],
-                     capture_output=True, timeout=15)
+        wp = self._out(self._user_systemctl("is-active", "wireplumber")).strip() == "active"
+        if wp:
+            self._user_systemctl("stop", "wireplumber")
+            self._deadman("bthid-wp-deadman", "systemctl", "--user", "start", "wireplumber")
+        pulse = False
+        if not wp and shutil.which("pactl"):
+            info = self._out(self._user_cmd("pactl", "info")).lower()
+            mods = self._out(self._user_cmd("pactl", "list", "short", "modules"))
+            # real PulseAudio: "Server Name: pulseaudio"; pipewire-pulse mentions PipeWire → skip
+            if "pulseaudio" in info and "pipewire" not in info and "module-bluetooth-discover" in mods:
+                self._user_cmd("pactl", "unload-module", "module-bluetooth-discover")   # rc is 0 even on failure
+                pulse = True
+                self._deadman("bthid-pa-deadman", "pactl", "load-module", "module-bluetooth-discover")
+        log(f"pairing: audio paused (wireplumber={wp}, pulseaudio={pulse})")
         os.makedirs(os.path.dirname(PAIR_DROPIN), exist_ok=True)
         with open(PAIR_DROPIN, "w") as f:
-            f.write("[Service]\nExecStart=\n"
+            f.write(f"# bthid wp={int(wp)} pulse={int(pulse)}\n"      # read back by exit_pair_mode
+                    "[Service]\nExecStart=\n"
                     f"ExecStart={find_bluetoothd()} -C --noplugin=input,a2dp,avrcp\n")
         self.bluez_ready = False
         self.run(["systemctl", "daemon-reload"], timeout=30)
         self.run(["systemctl", "restart", "bluetooth"], timeout=30)
 
     def exit_pair_mode(self):
-        """Every step runs even if an earlier one fails — audio must come back."""
+        """Every step runs even if an earlier one fails — audio must come back.
+        Only restarts what enter_pair_mode actually stopped (flags kept in the drop-in)."""
+        wp = pulse = False
         steps = []
         if os.path.exists(PAIR_DROPIN):
+            try:
+                head = open(PAIR_DROPIN).readline()
+                if head.startswith("# bthid"):
+                    wp, pulse = "wp=1" in head, "pulse=1" in head
+                else:            # drop-in from an older version: it always stopped wireplumber
+                    wp = True
+            except OSError:
+                wp = True
             steps += [lambda: os.remove(PAIR_DROPIN),
                       lambda: self.run(["systemctl", "daemon-reload"], timeout=30),
                       lambda: self.run(["systemctl", "restart", "bluetooth"], timeout=30)]
-        steps += [lambda: self._user_systemctl("start", "wireplumber"),
-                  lambda: self._user_systemctl("stop", "bthid-wp-deadman.timer")]
+        if wp:
+            steps += [lambda: self._user_systemctl("start", "wireplumber")]
+        if pulse:
+            steps += [lambda: self._user_cmd("pactl", "load-module", "module-bluetooth-discover")]
+        steps += [lambda: self._user_systemctl("stop", "bthid-wp-deadman.timer", "bthid-pa-deadman.timer")]
         for step in steps:
             try: step()
             except Exception as e: log("exit_pair_mode step failed:", e)

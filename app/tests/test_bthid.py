@@ -209,12 +209,76 @@ class DaemonTest(unittest.TestCase):
         for p in (mock.patch.object(B, "CONFIG_PATH", self.cfg_path),
                   mock.patch.object(B, "PAIR_DROPIN", self.dropin)):
             p.start(); self.addCleanup(p.stop)
-        self.runs = []
+        self.runs = []; self.wp_state = "active"
         cfg = B.load_config(); cfg["user"] = "tester"
-        self.d = B.Daemon(cfg, run=lambda args, **kw: self.runs.append(args))
+        self.d = B.Daemon(cfg, run=self.fake_run)
         self.d.bluez = FakeBluez()
 
     def tearDown(self): self.tmp.cleanup()
+
+    def fake_run(self, args, **kw):
+        self.runs.append(args)
+        import subprocess
+        out = self.wp_state + "\n" if args[-2:] == ["is-active", "wireplumber"] else ""
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    def test_pair_mode_skips_wireplumber_when_not_running(self):
+        self.wp_state = "inactive"
+        with mock.patch.object(B.shutil, "which", return_value=None):
+            self.d.enter_pair_mode()
+        self.assertNotIn(["systemctl", "--user", "--machine=tester@", "stop", "wireplumber"], self.runs)
+        self.assertIn("wp=0 pulse=0", open(self.dropin).readline())
+        self.runs.clear(); self.d.exit_pair_mode()
+        self.assertNotIn(["systemctl", "--user", "--machine=tester@", "start", "wireplumber"], self.runs)
+
+    def test_pair_mode_pulseaudio(self):
+        self.wp_state = "inactive"
+        import subprocess
+        def run(args, **kw):
+            self.runs.append(args)
+            if args[-2:] == ["pactl", "info"]:       # real output captured from PulseAudio 15.99 (22.04)
+                out = "Server String: /run/user/1000/pulse/native\nServer Name: pulseaudio\nServer Version: 15.99.1\n"
+            elif args[-3:] == ["list", "short", "modules"]:
+                out = "23\tmodule-bluetooth-policy\t\t\n24\tmodule-bluetooth-discover\t\t\n"
+            else:
+                out = ""
+            return subprocess.CompletedProcess(args, 0, out, "")
+        self.d.run = run
+        with mock.patch.object(B.shutil, "which", return_value="/usr/bin/pactl"), \
+             mock.patch("pwd.getpwnam", return_value=mock.Mock(pw_uid=1000)):
+            self.d.enter_pair_mode()
+            self.assertTrue(any(a[-2:] == ["unload-module", "module-bluetooth-discover"] for a in self.runs))
+            self.assertTrue(any("bthid-pa-deadman" in " ".join(a) for a in self.runs))
+            self.assertIn("pulse=1", open(self.dropin).readline())
+            self.runs.clear(); self.d.exit_pair_mode()
+        self.assertTrue(any(a[-2:] == ["load-module", "module-bluetooth-discover"] for a in self.runs))
+        self.assertTrue(any(a[0] == "runuser" and "XDG_RUNTIME_DIR=/run/user/1000" in a for a in self.runs))
+
+    def test_pair_mode_pipewire_pulse_and_missing_module_skipped(self):
+        self.wp_state = "inactive"
+        import subprocess
+        for info, mods in (("Server Name: PulseAudio (on PipeWire 1.0.5)\n", "1\tmodule-bluetooth-discover\n"),
+                           ("Server Name: pulseaudio\n", "23\tmodule-bluetooth-policy\n")):
+            self.runs.clear()
+            def run(args, **kw):
+                self.runs.append(args)
+                out = info if args[-2:] == ["pactl", "info"] else mods if args[-3:] == ["list", "short", "modules"] else ""
+                return subprocess.CompletedProcess(args, 0, out, "")
+            self.d.run = run
+            with mock.patch.object(B.shutil, "which", return_value="/usr/bin/pactl"), \
+                 mock.patch("pwd.getpwnam", return_value=mock.Mock(pw_uid=1000)):
+                self.d.enter_pair_mode()
+            self.assertFalse(any("unload-module" in a for a in self.runs), info)
+            self.assertIn("pulse=0", open(self.dropin).readline())
+
+    def test_old_dropin_without_flags_restarts_wireplumber(self):
+        os.makedirs(os.path.dirname(self.dropin)); open(self.dropin, "w").write("[Service]\nExecStart=\n")
+        self.d.exit_pair_mode()
+        self.assertIn(["systemctl", "--user", "--machine=tester@", "start", "wireplumber"], self.runs)
+
+    def test_user_cmd_without_user(self):
+        self.d.cfg["user"] = None
+        self.assertIsNone(self.d._user_cmd("pactl", "info")); self.assertIsNone(self.d._user_systemctl("x"))
 
     def test_config_roundtrip(self):
         cfg = B.load_config(os.path.join(self.tmp.name, "missing.json"))
@@ -273,21 +337,21 @@ class DaemonTest(unittest.TestCase):
     def test_enter_pair_mode_failure_restores(self):
         def boom(args, **kw):
             if args[:2] == ["systemctl", "restart"]: raise RuntimeError("restart failed")
-            self.runs.append(args)
+            return self.fake_run(args, **kw)
         self.d.run = boom
         r = self.d.pair_start()
         self.assertFalse(r["ok"]); self.assertEqual(self.d.state, "idle")
         self.assertIn(["systemctl", "--user", "--machine=tester@", "start", "wireplumber"], self.runs)
 
     def test_exit_pair_mode_restores_audio_even_if_restart_hangs(self):
-        os.makedirs(os.path.dirname(self.dropin)); open(self.dropin, "w").close()
+        os.makedirs(os.path.dirname(self.dropin)); open(self.dropin, "w").write("# bthid wp=1 pulse=0\n")
         import subprocess
         def hang(args, **kw):
             if args[:2] == ["systemctl", "restart"]: raise subprocess.TimeoutExpired(args, 30)
             self.runs.append(args)
         self.d.run = hang; self.d.exit_pair_mode()
         self.assertIn(["systemctl", "--user", "--machine=tester@", "start", "wireplumber"], self.runs)
-        self.assertIn(["systemctl", "--user", "--machine=tester@", "stop", "bthid-wp-deadman.timer"], self.runs)
+        self.assertIn(["systemctl", "--user", "--machine=tester@", "stop", "bthid-wp-deadman.timer", "bthid-pa-deadman.timer"], self.runs)
 
     def test_remove(self):
         self.d.cfg.update(target=self.MAC, devices=[self.MAC])
@@ -639,6 +703,12 @@ class TrayTest(unittest.TestCase):
         self.assertIn("준비", T.summary(dict(base, state="preparing")))
         self.assertIn("오류", T.summary({"ok": False, "error": "x"}))
 
+    def test_icon_fallback(self):
+        st = {"ok": True, "hid_connected": True}
+        self.assertEqual(T.icon_for(st), "bluetooth-active")
+        self.assertEqual(T.icon_for(st, lambda n: n == "bluetooth"), "bluetooth")
+        self.assertEqual(T.icon_for(st, lambda n: False), "bluetooth-active")      # nothing found → first name
+
     def test_hotkey_text(self):
         self.assertEqual(T.hotkey_text([97, 100]), "R-Ctrl(한자) + R-Alt(한/영)")
         self.assertEqual(T.key_name(30), "A")
@@ -810,6 +880,7 @@ class DoctorTest(unittest.TestCase):
     def test_adapter_and_rfkill(self):
         with tempfile.TemporaryDirectory() as sysfs, tempfile.TemporaryDirectory() as rf:
             r = Dr.Report(); Dr.check_adapter(r, sysfs, rf); self.assertEqual(r.rows[0][0], "FAIL")
+            r = Dr.Report(); Dr.check_adapter(r, sysfs, rf, pre=True); self.assertEqual(r.rows[0][0], "WARN")
             os.makedirs(os.path.join(sysfs, "hci0")); os.makedirs(os.path.join(sysfs, "hci0:1"))
             DaemonEnvTest._rfkill(None, rf, "rfkill0", "bluetooth", "1")
             r = Dr.Report(); Dr.check_adapter(r, sysfs, rf)
@@ -835,7 +906,7 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(self.levels(r)["bluetoothd"], "OK")
 
     def test_audio(self):
-        for which, lvl in ((lambda n: n == "wireplumber", "OK"), (lambda n: n == "pulseaudio", "WARN"), (lambda n: None, "OK")):
+        for which, lvl in ((lambda n: n == "wireplumber", "OK"), (lambda n: n == "pulseaudio", "OK"), (lambda n: None, "OK")):
             with mock.patch.object(Dr.shutil, "which", which):
                 r = Dr.Report(); Dr.check_audio(r); self.assertEqual(r.rows[0][0], lvl)
 
@@ -861,12 +932,17 @@ class DoctorTest(unittest.TestCase):
             if cmd[0] == "gnome-extensions": return subprocess_result(0, "other@x\n")
             return subprocess_result(1, "")
         with mock.patch.dict(os.environ, env), mock.patch.object(Dr, "run", fake_run), \
+             mock.patch.object(Dr.os, "geteuid", return_value=1000), \
              mock.patch.object(Dr.shutil, "which", return_value="/usr/bin/gnome-extensions"):
             r = Dr.Report(); Dr.check_desktop(r)
         lv = self.levels(r)
         self.assertEqual(lv["GNOME 트레이 확장"], "FAIL"); self.assertEqual(lv["트레이 실행"], "WARN")
-        with mock.patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": ""}):
+        with mock.patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": ""}), mock.patch.object(Dr.os, "geteuid", return_value=1000):
             r = Dr.Report(); Dr.check_desktop(r); self.assertEqual(r.rows[0][0], "WARN")
+        with mock.patch.dict(os.environ, {"DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "XFCE"}), \
+             mock.patch.object(Dr.os, "geteuid", return_value=1000), mock.patch.object(Dr, "is_gnome", return_value=False), \
+             mock.patch.object(Dr, "run", fake_run):
+            r = Dr.Report(); Dr.check_desktop(r); self.assertEqual(self.levels(r)["데스크톱 세션"], "WARN")
         with mock.patch.object(Dr.os, "geteuid", return_value=0):
             r = Dr.Report(); Dr.check_desktop(r); self.assertEqual(r.rows, [])
 

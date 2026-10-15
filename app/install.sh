@@ -46,20 +46,27 @@ fi
 echo "[5/7] bluetoothd: 키보드 장치 클래스 + input 플러그인 비활성화"
 BTD=$(for p in /usr/libexec/bluetooth/bluetoothd /usr/lib/bluetooth/bluetoothd /usr/sbin/bluetoothd; do [ -x "$p" ] && echo "$p" && break; done || true)
 [ -n "$BTD" ] || { echo "bluetoothd 실행 파일을 못 찾았어요 (bluez 설치 확인)"; exit 1; }
+# 원래 상태 기록 (재실행해도 최초 설치 전 상태만 남겨요):
+#   *.bthid.bak  = 원래 파일 백업,  *.bthid.none = 원래 파일이 없었음
 MAIN=/etc/bluetooth/main.conf
 install -d /etc/bluetooth
+if [ ! -f "$MAIN.bthid.bak" ] && [ ! -f "$MAIN.bthid.none" ]; then
+  if [ -f "$MAIN" ]; then cp "$MAIN" "$MAIN.bthid.bak"; else touch "$MAIN.bthid.none"; fi
+fi
 [ -f "$MAIN" ] || printf '[General]\n' > "$MAIN"
-[ -f "$MAIN.bthid.bak" ] || cp "$MAIN" "$MAIN.bthid.bak"
-grep -q '^\[General\]' "$MAIN" || sed -i '1i [General]' "$MAIN"
+grep -qE '^\s*\[General\]' "$MAIN" || sed -i '1i [General]' "$MAIN"
 if grep -qE '^\s*Class\s*=' "$MAIN"; then
   sed -i -E 's/^\s*Class\s*=.*/Class = 0x002540/' "$MAIN"
 else
-  sed -i '/^\[General\]/a Class = 0x002540' "$MAIN"
+  sed -i -E '0,/^\s*\[General\]/s//[General]\nClass = 0x002540/' "$MAIN"
 fi
 install -d /etc/systemd/system/bluetooth.service.d
 DROPIN=/etc/systemd/system/bluetooth.service.d/hid.conf
-if [ -f "$DROPIN" ] && [ ! -f "$DROPIN.bthid.bak" ]; then cp "$DROPIN" "$DROPIN.bthid.bak"; fi
-printf '[Service]\nExecStart=\nExecStart=%s -C --noplugin=input\n' "$BTD" > "$DROPIN"
+if [ ! -f "$DROPIN.bthid.bak" ] && [ ! -f "$DROPIN.bthid.none" ]; then
+  if [ -f "$DROPIN" ] && ! grep -q '^# bthid-managed' "$DROPIN"; then cp "$DROPIN" "$DROPIN.bthid.bak"
+  else touch "$DROPIN.bthid.none"; fi
+fi
+printf '# bthid-managed\n[Service]\nExecStart=\nExecStart=%s -C --noplugin=input\n' "$BTD" > "$DROPIN"
 
 echo "[6/7] 서비스 시작"
 systemctl daemon-reload
@@ -69,11 +76,18 @@ systemctl restart bthidd
 
 echo "[7/7] 트레이 자동 시작 등록"
 GRP=$(id -gn "$USER_NAME")
-install -d -o "$USER_NAME" -g "$GRP" "$USER_HOME/.config" "$USER_HOME/.config/autostart"
+# 기존 ~/.config 권한은 건드리지 않아요 (없을 때만 700으로 생성)
+sudo -u "$USER_NAME" mkdir -p -m 700 "$USER_HOME/.config"
+sudo -u "$USER_NAME" mkdir -p "$USER_HOME/.config/autostart"
 install -m 644 -o "$USER_NAME" -g "$GRP" "$SRC/bthid-tray.desktop" "$USER_HOME/.config/autostart/"
-if command -v gnome-extensions >/dev/null && [ -S "/run/user/$USER_UID/bus" ]; then
-  sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_UID/bus" \
-    gnome-extensions enable ubuntu-appindicators@ubuntu.com 2>/dev/null || true
+EXT_NOTE=""
+if command -v gnome-shell >/dev/null; then
+  if [ -S "/run/user/$USER_UID/bus" ] && sudo -u "$USER_NAME" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_UID/bus" \
+       gnome-extensions enable ubuntu-appindicators@ubuntu.com 2>/dev/null; then
+    :
+  else
+    EXT_NOTE="트레이 아이콘용 GNOME 확장을 켜지 못했어요 → 로그아웃 후 다시 로그인한 뒤 'bthid-doctor'로 확인해 주세요"
+  fi
 fi
 
 echo
@@ -82,6 +96,7 @@ echo "── 설치 후 진단 ──"
 /usr/bin/python3 "$LIB/bthid_doctor.py" || true
 echo
 echo "설치 완료. 트레이는 다음 로그인부터 자동으로 떠요."
+[ -z "$EXT_NOTE" ] || echo "※ $EXT_NOTE"
 echo "지금 바로 띄우려면 (sudo 없이):  bthid-tray &"
 echo "문제가 있으면 (sudo 없이):       bthid-doctor"
 echo "로그 보기:                       journalctl -u bthidd -f"

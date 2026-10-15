@@ -49,11 +49,24 @@ def summary(st):
         return "입력 전달 중 (PC 입력 차단)"
     return "연결됨 — 입력 전달 꺼짐" if st.get("hid_connected") else "폰 연결 대기 중"
 
-def icon_for(st):
-    if not st.get("ok"): return "dialog-error"
-    if st.get("relay"): return "input-keyboard"
-    if st.get("hid_connected"): return "bluetooth-active"
-    return "bluetooth-disabled"
+ICON_CHOICES = {   # first name present in the icon theme wins (Yaru/Humanity/Adwaita/Breeze differ)
+    "error":     ["dialog-error", "dialog-error-symbolic", "image-missing"],
+    "relay":     ["input-keyboard", "input-keyboard-symbolic", "preferences-desktop-keyboard"],
+    "connected": ["bluetooth-active", "bluetooth-active-symbolic", "bluetooth", "network-wireless"],
+    "idle":      ["bluetooth-disabled", "bluetooth-disabled-symbolic", "bluetooth", "network-offline"],
+}
+
+def icon_key(st):
+    if not st.get("ok"): return "error"
+    if st.get("relay"): return "relay"
+    if st.get("hid_connected"): return "connected"
+    return "idle"
+
+def pick_icon(names, has_icon):
+    return next((n for n in names if has_icon(n)), names[0])
+
+def icon_for(st, has_icon=lambda n: True):
+    return pick_icon(ICON_CHOICES[icon_key(st)], has_icon)
 
 
 import gi
@@ -205,7 +218,8 @@ class App:
         st = request("status")
         self.last = st if st.get("ok") else {}
         self.item_status.set_label(summary(st))
-        self.ind.set_icon_full(icon_for(st), summary(st))
+        theme = Gtk.IconTheme.get_default()
+        self.ind.set_icon_full(icon_for(st, theme.has_icon if theme else (lambda n: True)), summary(st))
         if self.win.get_visible():
             self.win.refresh(st)
         return True
