@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=BT HID Relay
+Comment=PC 키보드/마우스를 블루투스로 폰에 전달
+Exec=/usr/bin/python3 /usr/local/lib/bthid/bthid_tray.py
+Icon=input-keyboard
+Terminal=false
+X-GNOME-Autostart-enabled=true
